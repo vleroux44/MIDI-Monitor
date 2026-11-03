@@ -1,0 +1,37 @@
+#pragma code_page(65001)
+#include <windows.h>
+
+1 RT_MANIFEST "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040C04B0"
+        BEGIN
+            VALUE "CompanyName", "Organologic\0"
+            VALUE "FileDescription", "MIDI Monitor\0"
+            VALUE "FileVersion", "1.0.0\0"
+            VALUE "InternalName", "MIDIMonitor\0"
+            VALUE "LegalCopyright", "© 2026 Valentin Leroux\0"
+            VALUE "OriginalFilename", "MIDI Monitor.exe\0"
+            VALUE "ProductName", "MIDI Monitor\0"
+            VALUE "ProductVersion", "1.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x040C, 1200
+    END
+END
