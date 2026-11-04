@@ -14,6 +14,7 @@ add_library(midi_core STATIC
     src/MidiByteStreamParser.cpp
     src/MidiLog.cpp
     src/CsvExporter.cpp
+    src/MidiView.cpp
 )
 target_include_directories(midi_core PUBLIC src)
 
@@ -78,4 +79,22 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME WinMMIntegrationTests COMMAND WinMMIntegrationTests)
     set_tests_properties(WinMMIntegrationTests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 10)
+
+    add_executable(MainWindowStressTests
+        tests/MainWindowStressTests.cpp
+        src/MainWindow.cpp
+        src/MidiInput.cpp
+    )
+    target_include_directories(MainWindowStressTests PRIVATE src)
+    target_compile_definitions(MainWindowStressTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN MIDI_MONITOR_TESTING)
+    target_link_libraries(MainWindowStressTests PRIVATE midi_core winmm comctl32 comdlg32 shell32 ole32)
+    if(MSVC)
+        target_compile_options(MainWindowStressTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+        set_property(TARGET MainWindowStressTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    else()
+        target_compile_options(MainWindowStressTests PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_options(MainWindowStressTests PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME MainWindowStressTests COMMAND MainWindowStressTests)
+    set_tests_properties(MainWindowStressTests PROPERTIES TIMEOUT 10)
 endif()

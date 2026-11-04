@@ -1,8 +1,59 @@
+# Répertoires de compilation CMake/IDE
 /build/
 /build-*/
-/.vs/
+/cmake-build-*/
 /out/
+/.vs/
+/.vscode/
+/.idea/
+CMakeFiles/
+Testing/
+_deps/
+
+# Fichiers générés par CMake
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+install_manifest.txt
+.ninja_deps
+.ninja_log
+*.ninja
+*.cmake.user
+
+# Artefacts de compilation C/C++ et MSVC
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.res
+*.pch
+*.tlog
+*.lastbuildstate
+*.sdf
+*.opensdf
+*.exe
+*.dll
+ipch/
+
+# L'exécutable Release livré avec le projet reste versionné
+!/dist/windows/MIDI Monitor.exe
+
+# Fichiers propres aux utilisateurs et à l'OS
 *.user
 *.suo
 *.VC.db
 *.VC.VC.opendb
+*.code-workspace
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

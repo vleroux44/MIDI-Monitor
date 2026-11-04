@@ -1,6 +1,9 @@
 #pragma code_page(65001)
 #include <windows.h>
 
+#define IDI_APP_ICON 101
+
+IDI_APP_ICON ICON "MIDIMonitor.ico"
 1 RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO

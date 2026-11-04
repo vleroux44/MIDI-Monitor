@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct MidiInputPacket {
@@ -40,6 +41,9 @@ public:
     std::vector<MidiInputPacket> drain(std::size_t maximum = 4096);
     std::uint64_t takeDroppedCount();
     bool isOpen() const { return handle_ != nullptr; }
+#ifdef MIDI_MONITOR_TESTING
+    void enqueueForTesting(MidiInputPacket packet) { enqueue(std::move(packet)); }
+#endif
 
     static constexpr UINT NotificationMessage = WM_APP + 42;
 

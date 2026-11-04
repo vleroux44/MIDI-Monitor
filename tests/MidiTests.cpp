@@ -1,6 +1,7 @@
 #include "CsvExporter.h"
 #include "MidiByteStreamParser.h"
 #include "MidiDecoder.h"
+#include "MidiView.h"
 
 #include <filesystem>
 #include <fstream>
@@ -28,7 +29,9 @@ void decoderTests() {
     expect(noteOff.messageType == "Note Off" && noteOff.channel == 3, "Note Off");
 
     auto zero = MidiDecoder::decode({0x90, 0x3C, 0x00});
-    expect(zero.messageType == "Note Off (Note On vel 0)", "Zero velocity interpretation");
+    expect(zero.messageType == "Note Off", "Zero velocity interpretation");
+    expect(zero.description == "Note Off - Ch 1 - C4 (60) - Vel 0",
+           "Zero velocity description remains concise");
     expect(zero.statusHex == "90", "Original zero velocity status retained");
 
     auto cc = MidiDecoder::decode({0xB2, 0x40, 0x7F});
@@ -122,6 +125,31 @@ void csvTests() {
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
+
+void viewTests() {
+    auto note = MidiDecoder::decode({0x90, 0x3C, 0x64}, 2.0);
+    auto cc = MidiDecoder::decode({0xB0, 0x07, 0x40}, 1.0);
+    auto bend = MidiDecoder::decode({0xE0, 0x00, 0x40}, 3.0);
+    auto sysex = MidiDecoder::decode({0xF0, 0x7D, 0x01, 0xF7}, 4.0);
+    auto clock = MidiDecoder::decode({0xF8}, 5.0);
+
+    expect(midiMessageMatchesFilter(note, MidiFilter::Notes), "Notes filter");
+    expect(!midiMessageMatchesFilter(note, MidiFilter::ControlChange), "Notes excluded from CC filter");
+    expect(midiMessageMatchesFilter(cc, MidiFilter::ControlChange), "CC filter");
+    expect(midiMessageMatchesFilter(bend, MidiFilter::PitchBend), "Pitch filter");
+    expect(midiMessageMatchesFilter(sysex, MidiFilter::SysEx), "SysEx filter");
+    expect(midiMessageMatchesFilter(clock, MidiFilter::SystemRealtime), "Real-time filter");
+    expect(midiParameterText(note) == "C4 (60)", "Note parameter column");
+    expect(midiParameterText(cc) == "CC 7 - Volume", "CC parameter column");
+    expect(midiValueText(note) == "100", "Velocity value column");
+    expect(midiValueText(bend) == "8192 (centre)", "Pitch value column");
+    expect(compareMidiMessages(cc, note, MidiSortColumn::Timestamp) < 0,
+           "Numeric timestamp sorting");
+    expect(compareMidiMessages(note, cc, MidiSortColumn::Channel) == 0,
+           "Numeric channel sorting");
+    expect(compareMidiMessages(cc, note, MidiSortColumn::Parameter) < 0,
+           "Numeric parameter sorting");
+}
 }
 
 int main() {
@@ -129,6 +157,7 @@ int main() {
         decoderTests();
         parserTests();
         csvTests();
+        viewTests();
         std::cout << "OK - " << checks << " checks\n";
         return 0;
     } catch (const std::exception& error) {

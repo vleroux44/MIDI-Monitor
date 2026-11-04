@@ -9,6 +9,8 @@ L'application est écrite en C++17 avec Win32, WinMM, GDI et les contrôles comm
 Elle n'emploie aucune bibliothèque tierce et l'exécutable Release utilise le runtime C++
 statique.
 
+Le projet est distribué sous [licence MIT](LICENSE).
+
 ## Prérequis et compilation
 
 - Windows 10 ou Windows 11 x64 ;
@@ -28,6 +30,12 @@ La compilation copie automatiquement le programme dans
 `dist/windows/MIDI Monitor.exe`. L'application est de sous-système Windows : aucune console
 n'est ouverte et aucun privilège administrateur n'est normalement nécessaire.
 
+L'icône Windows multi-résolution est générée depuis `assets/MIDIMonitor.png` avec :
+
+```powershell
+.\tools\GenerateIcon.ps1
+```
+
 ## Utilisation
 
 1. Lancez MIDI Monitor.
@@ -35,10 +43,14 @@ n'est ouverte et aucun privilège administrateur n'est normalement nécessaire.
    arbitrairement au démarrage.
 3. Les messages apparaissent dans l'ordre de réception. Le journal suit la dernière ligne tant
    que la vue est en bas ; remonter dans la liste suspend le suivi jusqu'au retour en bas.
-4. `Ctrl+C` copie les lignes sélectionnées sous forme tabulée.
-5. **Réinitialiser** vide l'historique, les compteurs, la file en attente et remet l'origine
+4. Cliquez sur un en-tête pour trier la vue par horodatage, octets HEX, type, canal, paramètre ou
+   valeur. Un second clic inverse l'ordre. Ce tri ne modifie jamais l'historique ni le CSV.
+5. La liste **Filtre** permet d'isoler les notes, Control Change, Pitch Bend, SysEx, aftertouch,
+   Program Change, messages système temps réel, messages système communs ou erreurs.
+6. `Ctrl+C` copie les lignes sélectionnées sous forme tabulée, avec une colonne par champ.
+7. **Réinitialiser** vide l'historique, les compteurs, la file en attente et remet l'origine
    temporelle à zéro, sans déconnecter le port.
-6. **Sauvegarder CSV** exporte tout l'historique encore conservé, pas seulement les lignes
+8. **Sauvegarder CSV** exporte tout l'historique encore conservé, pas seulement les lignes
    visibles.
 
 **Actualiser** ferme proprement l'entrée active, réénumère les périphériques et demande une
@@ -80,8 +92,8 @@ non l'instant électrique exact d'émission sur le câble MIDI.
 
 `driver_timestamp_ms` conserve séparément le timestamp en millisecondes fourni par WinMM. Son
 origine et sa précision appartiennent au pilote. Il peut différer du compteur haute résolution
-de l'application. L'ordre du journal est toujours l'ordre des callbacks reçus, jamais un tri par
-timestamp.
+de l'application. L'historique et le CSV conservent toujours l'ordre des callbacks reçus. Le tri
+des colonnes ne concerne que la vue affichée.
 
 ## Limite essentielle : running status
 
@@ -105,7 +117,8 @@ L'historique conserve 100 000 messages. Une fois la limite atteinte, un avertiss
 affiché, les plus anciens messages sont remplacés et leur nombre reste visible. La file entre le
 callback et l'interface contient au maximum 65 536 événements ; une saturation est explicitement
 signalée avec le nombre de messages perdus. Les mises à jour sont traitées par lots sur le thread
-graphique.
+graphique, au maximum toutes les 20 ms. Lorsqu'une zone ancienne du journal est consultée, les
+nouvelles arrivées mettent à jour le nombre de lignes sans redessiner toute la liste.
 
 Les erreurs d'ouverture WinMM, de buffer SysEx, de réception et d'écriture CSV sont présentées à
 l'utilisateur. Fermer l'application arrête et réinitialise l'entrée, libère les en-têtes SysEx,
@@ -133,6 +146,10 @@ absent, annulation du running status et encodage/échappement CSV.
 réellement son entrée et sa sortie avec WinMM, envoie `90 3C 64` puis `80 3C 00` et vérifie leur
 réception dans cet ordre par le module de capture. Le test est marqué ignoré (et non échoué) si
 loopMIDI n'est pas disponible.
+
+`MainWindowStressTests` injecte 450 messages dans la file de l'interface, fait énumérer ses
+contrôles par Windows UI Automation puis remonte dans le journal. Il protège ainsi contre les
+blocages de la liste lors du défilement, sans dépendre d'un port MIDI externe.
 
 Les essais matériels avec Max/MSP, loopMIDI ou une interface USB restent manuels, car leur
 résultat dépend des logiciels et périphériques présents sur le poste.

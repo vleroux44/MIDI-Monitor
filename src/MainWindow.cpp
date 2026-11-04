@@ -11,6 +11,7 @@
 #include <cmath>
 #include <filesystem>
 #include <sstream>
+#include <utility>
 
 namespace {
 constexpr int IdInputCombo = 1001;
@@ -18,6 +19,16 @@ constexpr int IdRefresh = 1002;
 constexpr int IdReset = 1003;
 constexpr int IdSave = 1004;
 constexpr int IdFooterLink = 1005;
+constexpr int IdFilterCombo = 1006;
+constexpr int AppIconResource = 101;
+constexpr UINT_PTR MidiBatchTimerId = 2;
+constexpr UINT MidiBatchIntervalMs = 20;
+constexpr int TimestampColumnWidth = 105;
+constexpr int HexColumnWidth = 110;
+constexpr int TypeColumnWidth = 155;
+constexpr int ChannelColumnWidth = 55;
+constexpr int ValueColumnWidth = 85;
+constexpr int ColumnCount = 6;
 
 std::wstring utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
@@ -62,14 +73,17 @@ bool MainWindow::create(int showCommand) {
     wc.lpfnWndProc = &MainWindow::windowProc;
     wc.hInstance = instance_;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(1));
+    wc.hIcon = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(AppIconResource), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
     if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm = wc.hIcon;
+    wc.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(AppIconResource), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!wc.hIconSm) wc.hIconSm = wc.hIcon;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"OrganologicMidiMonitorWindow";
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
-    RECT rect{0, 0, 760, 540};
+    RECT rect{0, 0, 940, 600};
     AdjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, FALSE, 0);
     window_ = CreateWindowExW(0, wc.lpszClassName, L"MIDI Monitor", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
@@ -114,6 +128,7 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_COMMAND:
         if (LOWORD(wParam) == IdRefresh && HIWORD(wParam) == BN_CLICKED) refreshPorts();
         else if (LOWORD(wParam) == IdInputCombo && HIWORD(wParam) == CBN_SELCHANGE) connectSelectedPort();
+        else if (LOWORD(wParam) == IdFilterCombo && HIWORD(wParam) == CBN_SELCHANGE) applyFilter();
         else if (LOWORD(wParam) == IdReset && HIWORD(wParam) == BN_CLICKED) resetLog();
         else if (LOWORD(wParam) == IdSave && HIWORD(wParam) == BN_CLICKED) saveCsv();
         else if (LOWORD(wParam) == IdFooterLink && HIWORD(wParam) == STN_CLICKED)
@@ -121,14 +136,9 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_NOTIFY: {
         const auto* header = reinterpret_cast<NMHDR*>(lParam);
-        if (header->hwndFrom == listView_ && header->code == LVN_GETDISPINFOW) {
-            auto* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
-            if ((info->item.mask & LVIF_TEXT) && info->item.iItem >= 0
-                && static_cast<std::size_t>(info->item.iItem) < log_.size()) {
-                thread_local std::wstring text;
-                text = listText(static_cast<std::size_t>(info->item.iItem), info->item.iSubItem);
-                info->item.pszText = text.data();
-            }
+        if (header->hwndFrom == listView_ && header->code == LVN_COLUMNCLICK) {
+            const auto* click = reinterpret_cast<NMLISTVIEW*>(lParam);
+            sortByColumn(click->iSubItem);
             return 0;
         }
         if (header->hwndFrom == listView_ && header->code == LVN_KEYDOWN) {
@@ -154,12 +164,27 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case MidiInput::NotificationMessage:
-        drainMidi();
+        scheduleMidiDrain();
         return 0;
+    case WM_TIMER:
+        if (wParam == MidiBatchTimerId) {
+            KillTimer(window_, MidiBatchTimerId);
+            midiBatchTimerArmed_ = false;
+            drainMidi();
+            return 0;
+        }
+        break;
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        limits->ptMinTrackSize.x = scale(720, dpi_);
+        limits->ptMinTrackSize.y = scale(480, dpi_);
+        return 0;
+    }
     case WM_CLOSE:
         DestroyWindow(window_);
         return 0;
     case WM_DESTROY:
+        KillTimer(window_, MidiBatchTimerId);
         midiInput_.close();
         if (uiFont_) DeleteObject(uiFont_);
         if (monoFont_) DeleteObject(monoFont_);
@@ -188,24 +213,60 @@ void MainWindow::createControls() {
         0, 0, 0, 0, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdRefresh)), instance_, nullptr);
     statusLabel_ = CreateWindowExW(0, L"STATIC", L"Déconnecté", WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+    filterLabel_ = CreateWindowExW(0, L"STATIC", L"Filtre", WS_CHILD | WS_VISIBLE,
+        0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+    filterCombo_ = CreateWindowExW(0, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 0, scale(260, dpi_), window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFilterCombo)), instance_, nullptr);
+
+    const std::pair<const wchar_t*, MidiFilter> filters[] = {
+        {L"Tous les messages", MidiFilter::All},
+        {L"Notes (On / Off)", MidiFilter::Notes},
+        {L"Control Change (CC)", MidiFilter::ControlChange},
+        {L"Pitch Bend", MidiFilter::PitchBend},
+        {L"System Exclusive (SysEx)", MidiFilter::SysEx},
+        {L"Aftertouch / pression", MidiFilter::Aftertouch},
+        {L"Program Change", MidiFilter::ProgramChange},
+        {L"Système temps réel", MidiFilter::SystemRealtime},
+        {L"Système commun", MidiFilter::SystemCommon},
+        {L"Autres / erreurs", MidiFilter::OtherOrError}
+    };
+    for (const auto& entry : filters) {
+        const LRESULT index = SendMessageW(filterCombo_, CB_ADDSTRING, 0,
+                                            reinterpret_cast<LPARAM>(entry.first));
+        SendMessageW(filterCombo_, CB_SETITEMDATA, index,
+                     static_cast<LPARAM>(static_cast<int>(entry.second)));
+    }
+    SendMessageW(filterCombo_, CB_SETCURSEL, 0, 0);
     runningStatusLabel_ = CreateWindowExW(0, L"STATIC",
         L"Running status : non observable via WinMM (messages normalisés par Windows).",
         WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window_, nullptr, instance_, nullptr);
     listView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+    SetWindowTextW(listView_, L"Journal MIDI");
     ListView_SetExtendedListViewStyle(listView_,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
     LVCOLUMNW column{LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM};
     wchar_t timestamp[] = L"Horodatage";
-    column.pszText = timestamp; column.cx = scale(105, dpi_); column.iSubItem = 0;
+    column.pszText = timestamp; column.cx = scale(TimestampColumnWidth, dpi_); column.iSubItem = 0;
     ListView_InsertColumn(listView_, 0, &column);
     wchar_t hex[] = L"Données HEX";
-    column.pszText = hex; column.cx = scale(210, dpi_); column.iSubItem = 1;
+    column.pszText = hex; column.cx = scale(HexColumnWidth, dpi_); column.iSubItem = 1;
     ListView_InsertColumn(listView_, 1, &column);
-    wchar_t interpretation[] = L"Interprétation";
-    column.pszText = interpretation; column.cx = scale(400, dpi_); column.iSubItem = 2;
+    wchar_t type[] = L"Type";
+    column.pszText = type; column.cx = scale(TypeColumnWidth, dpi_); column.iSubItem = 2;
     ListView_InsertColumn(listView_, 2, &column);
+    wchar_t channel[] = L"Canal";
+    column.pszText = channel; column.cx = scale(ChannelColumnWidth, dpi_); column.iSubItem = 3;
+    ListView_InsertColumn(listView_, 3, &column);
+    wchar_t parameter[] = L"Paramètre";
+    column.pszText = parameter; column.cx = scale(240, dpi_); column.iSubItem = 4;
+    ListView_InsertColumn(listView_, 4, &column);
+    wchar_t value[] = L"Valeur";
+    column.pszText = value; column.cx = scale(ValueColumnWidth, dpi_); column.iSubItem = 5;
+    ListView_InsertColumn(listView_, 5, &column);
 
     counterLabel_ = CreateWindowExW(0, L"STATIC", L"Messages reçus : 0", WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
@@ -221,7 +282,8 @@ void MainWindow::createControls() {
         WS_CHILD | WS_VISIBLE | SS_NOTIFY, 0, 0, 0, 0, window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFooterLink)), instance_, nullptr);
 
-    for (HWND control : {inputLabel_, inputCombo_, refreshButton_, statusLabel_, runningStatusLabel_,
+    for (HWND control : {inputLabel_, inputCombo_, refreshButton_, statusLabel_, filterLabel_,
+                         filterCombo_, runningStatusLabel_,
                          counterLabel_, resetButton_, saveButton_, footerLabel_, footerLink_})
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     SendMessageW(listView_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
@@ -262,16 +324,29 @@ void MainWindow::layout() {
     x += refreshWidth + gap;
     MoveWindow(statusLabel_, x, y + scale(5, dpi_), statusWidth, controlHeight, TRUE);
 
+    y += controlHeight + scale(6, dpi_);
+    const int filterLabelWidth = scale(45, dpi_);
+    const int filterComboWidth = scale(185, dpi_);
+    MoveWindow(filterLabel_, margin, y + scale(5, dpi_), filterLabelWidth, controlHeight, TRUE);
+    MoveWindow(filterCombo_, margin + filterLabelWidth, y, filterComboWidth,
+               scale(260, dpi_), TRUE);
+    const int runningX = margin + filterLabelWidth + filterComboWidth + gap;
+    MoveWindow(runningStatusLabel_, runningX, y + scale(5, dpi_),
+               std::max(0, width - margin - runningX), scale(20, dpi_), TRUE);
     y += controlHeight + scale(5, dpi_);
-    MoveWindow(runningStatusLabel_, margin, y, width - 2 * margin, scale(20, dpi_), TRUE);
-    y += scale(23, dpi_);
 
     const int bottomControlsY = height - margin - scale(52, dpi_);
     const int listHeight = std::max(scale(100, dpi_), bottomControlsY - y - gap);
     MoveWindow(listView_, margin, y, width - 2 * margin, listHeight, TRUE);
-    ListView_SetColumnWidth(listView_, 0, scale(105, dpi_));
-    ListView_SetColumnWidth(listView_, 1, scale(210, dpi_));
-    ListView_SetColumnWidth(listView_, 2, std::max(scale(200, dpi_), width - 2 * margin - scale(315, dpi_) - 4));
+    ListView_SetColumnWidth(listView_, 0, scale(TimestampColumnWidth, dpi_));
+    ListView_SetColumnWidth(listView_, 1, scale(HexColumnWidth, dpi_));
+    ListView_SetColumnWidth(listView_, 2, scale(TypeColumnWidth, dpi_));
+    ListView_SetColumnWidth(listView_, 3, scale(ChannelColumnWidth, dpi_));
+    const int fixedColumns = TimestampColumnWidth + HexColumnWidth + TypeColumnWidth
+        + ChannelColumnWidth + ValueColumnWidth;
+    ListView_SetColumnWidth(listView_, 4, std::max(scale(170, dpi_),
+        width - 2 * margin - scale(fixedColumns, dpi_) - 4));
+    ListView_SetColumnWidth(listView_, 5, scale(ValueColumnWidth, dpi_));
 
     y = bottomControlsY;
     MoveWindow(counterLabel_, margin, y + scale(6, dpi_), scale(260, dpi_), controlHeight, TRUE);
@@ -333,14 +408,122 @@ void MainWindow::connectSelectedPort() {
 }
 
 bool MainWindow::isListAtBottom() const {
-    if (log_.size() == 0) return true;
+    if (visibleRows_.empty()) return true;
     const int top = ListView_GetTopIndex(listView_);
     const int perPage = ListView_GetCountPerPage(listView_);
-    return top + perPage >= static_cast<int>(log_.size()) - 1;
+    return top + perPage >= static_cast<int>(visibleRows_.size()) - 1;
+}
+
+void MainWindow::scheduleMidiDrain() {
+    if (midiBatchTimerArmed_) return;
+    if (SetTimer(window_, MidiBatchTimerId, MidiBatchIntervalMs, nullptr)) {
+        midiBatchTimerArmed_ = true;
+    } else {
+        drainMidi();
+    }
+}
+
+bool MainWindow::visibleRowLess(std::size_t left, std::size_t right) const {
+    const auto& leftMessage = log_.at(left);
+    const auto& rightMessage = log_.at(right);
+    const int comparison = compareMidiMessages(leftMessage, rightMessage, sortColumn_);
+    if (comparison == 0) return leftMessage.index < rightMessage.index;
+    return sortAscending_ ? comparison < 0 : comparison > 0;
+}
+
+void MainWindow::rebuildVisibleRows() {
+    visibleRows_.clear();
+    visibleRows_.reserve(log_.size());
+    for (std::size_t index = 0; index < log_.size(); ++index) {
+        if (midiMessageMatchesFilter(log_.at(index), filter_)) visibleRows_.push_back(index);
+    }
+    if (sortColumn_ != MidiSortColumn::None) {
+        std::stable_sort(visibleRows_.begin(), visibleRows_.end(),
+                         [this](std::size_t left, std::size_t right) {
+                             return visibleRowLess(left, right);
+                         });
+    }
+}
+
+void MainWindow::updateListItemCount(bool redrawAll) {
+    int firstRow = ListView_GetItemCount(listView_);
+    if (!redrawAll && firstRow >= static_cast<int>(visibleRows_.size())) return;
+
+    SendMessageW(listView_, WM_SETREDRAW, FALSE, 0);
+    if (redrawAll) {
+        ListView_DeleteAllItems(listView_);
+        firstRow = 0;
+    }
+    for (std::size_t row = static_cast<std::size_t>(firstRow);
+         row < visibleRows_.size(); ++row) {
+        insertListRow(row);
+    }
+    SendMessageW(listView_, WM_SETREDRAW, TRUE, 0);
+    if (redrawAll) {
+        RedrawWindow(listView_, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    }
+}
+
+void MainWindow::insertListRow(std::size_t row) {
+    std::wstring timestamp = listText(row, 0);
+    LVITEMW item{};
+    item.mask = LVIF_TEXT;
+    item.iItem = static_cast<int>(row);
+    item.pszText = timestamp.data();
+    const int inserted = ListView_InsertItem(listView_, &item);
+    if (inserted < 0) return;
+    for (int column = 1; column < ColumnCount; ++column) {
+        std::wstring text = listText(row, column);
+        ListView_SetItemText(listView_, inserted, column, text.data());
+    }
+}
+
+void MainWindow::applyFilter() {
+    const LRESULT selection = SendMessageW(filterCombo_, CB_GETCURSEL, 0, 0);
+    if (selection == CB_ERR) return;
+    const LRESULT data = SendMessageW(filterCombo_, CB_GETITEMDATA, selection, 0);
+    if (data == CB_ERR) return;
+    filter_ = static_cast<MidiFilter>(data);
+    rebuildVisibleRows();
+    updateListItemCount(true);
+    if (!visibleRows_.empty()) ListView_EnsureVisible(listView_, 0, FALSE);
+    updateCounter();
+}
+
+void MainWindow::sortByColumn(int column) {
+    if (column < 0 || column >= ColumnCount) return;
+    const auto selected = static_cast<MidiSortColumn>(column);
+    if (sortColumn_ == selected) sortAscending_ = !sortAscending_;
+    else {
+        sortColumn_ = selected;
+        sortAscending_ = true;
+    }
+    rebuildVisibleRows();
+    updateListItemCount(true);
+    updateSortIndicator();
+    updateCounter();
+}
+
+void MainWindow::updateSortIndicator() {
+    HWND header = ListView_GetHeader(listView_);
+    if (!header) return;
+    for (int column = 0; column < ColumnCount; ++column) {
+        HDITEMW item{};
+        item.mask = HDI_FORMAT;
+        if (!Header_GetItem(header, column, &item)) continue;
+        item.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (sortColumn_ == static_cast<MidiSortColumn>(column)) {
+            item.fmt |= sortAscending_ ? HDF_SORTUP : HDF_SORTDOWN;
+        }
+        Header_SetItem(header, column, &item);
+    }
 }
 
 void MainWindow::drainMidi() {
-    const bool follow = isListAtBottom();
+    const bool follow = sortColumn_ == MidiSortColumn::None && isListAtBottom();
+    const std::size_t previousLogSize = log_.size();
+    const std::size_t previousVisibleSize = visibleRows_.size();
     const auto packets = midiInput_.drain();
     bool discarded = false;
     for (const auto& packet : packets) {
@@ -367,9 +550,31 @@ void MainWindow::drainMidi() {
             L"MIDI Monitor", MB_OK | MB_ICONWARNING);
     }
     if (!packets.empty()) {
-        ListView_SetItemCountEx(listView_, static_cast<int>(log_.size()), LVSICF_NOINVALIDATEALL);
-        InvalidateRect(listView_, nullptr, FALSE);
-        if (follow && log_.size()) ListView_EnsureVisible(listView_, static_cast<int>(log_.size() - 1), FALSE);
+        bool viewReordered = discarded;
+        if (discarded) {
+            rebuildVisibleRows();
+        } else {
+            for (std::size_t index = previousLogSize; index < log_.size(); ++index) {
+                if (midiMessageMatchesFilter(log_.at(index), filter_)) visibleRows_.push_back(index);
+            }
+            if (sortColumn_ != MidiSortColumn::None && visibleRows_.size() > previousVisibleSize) {
+                auto newRows = visibleRows_.begin() + static_cast<std::ptrdiff_t>(previousVisibleSize);
+                std::stable_sort(newRows, visibleRows_.end(),
+                    [this](std::size_t left, std::size_t right) {
+                        return visibleRowLess(left, right);
+                    });
+                std::inplace_merge(visibleRows_.begin(), newRows, visibleRows_.end(),
+                    [this](std::size_t left, std::size_t right) {
+                        return visibleRowLess(left, right);
+                    });
+                viewReordered = true;
+            }
+        }
+        updateListItemCount(viewReordered);
+        if (follow && !visibleRows_.empty()) {
+            const int last = static_cast<int>(visibleRows_.size() - 1);
+            ListView_EnsureVisible(listView_, last, FALSE);
+        }
         updateCounter();
     }
 }
@@ -378,13 +583,16 @@ void MainWindow::resetLog() {
     midiInput_.resetClock();
     midiInput_.clearQueue();
     log_.clear();
+    visibleRows_.clear();
     capacityWarningShown_ = false;
-    ListView_SetItemCountEx(listView_, 0, 0);
+    ListView_DeleteAllItems(listView_);
     updateCounter();
 }
 
 void MainWindow::updateCounter() {
     std::wstring text = L"Messages reçus : " + std::to_wstring(log_.totalReceived());
+    if (filter_ != MidiFilter::All)
+        text += L" — affichés : " + std::to_wstring(visibleRows_.size());
     if (log_.discarded()) text += L" — anciens supprimés : " + std::to_wstring(log_.discarded());
     SetWindowTextW(counterLabel_, text.c_str());
 }
@@ -396,19 +604,26 @@ void MainWindow::setStatus(const std::wstring& text, bool error) {
 }
 
 std::wstring MainWindow::listText(std::size_t row, int column) const {
-    const auto& message = log_.at(row);
+    if (row >= visibleRows_.size()) return {};
+    const auto& message = log_.at(visibleRows_[row]);
     if (column == 0) return formatElapsed(message.elapsedMs);
     if (column == 1) return utf8ToWide(message.rawHex);
-    return utf8ToWide(message.description);
+    if (column == 2) return utf8ToWide(message.messageType);
+    if (column == 3) return message.channel < 0 ? std::wstring{} : std::to_wstring(message.channel);
+    if (column == 4) return utf8ToWide(midiParameterText(message));
+    if (column == 5) return utf8ToWide(midiValueText(message));
+    return {};
 }
 
 void MainWindow::copySelectedRows() {
     std::wstring text;
     int item = -1;
     while ((item = ListView_GetNextItem(listView_, item, LVNI_SELECTED)) != -1) {
-        text += listText(static_cast<std::size_t>(item), 0) + L"\t"
-              + listText(static_cast<std::size_t>(item), 1) + L"\t"
-              + listText(static_cast<std::size_t>(item), 2) + L"\r\n";
+        for (int column = 0; column < ColumnCount; ++column) {
+            if (column) text += L'\t';
+            text += listText(static_cast<std::size_t>(item), column);
+        }
+        text += L"\r\n";
     }
     if (text.empty() || !OpenClipboard(window_)) return;
     EmptyClipboard();

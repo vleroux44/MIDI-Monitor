@@ -118,8 +118,8 @@ MidiMessage MidiDecoder::decode(const std::vector<std::uint8_t>& bytes,
             result.noteName = noteName(result.noteNumber);
             result.velocity = result.data2;
             if (result.velocity == 0) {
-                result.messageType = "Note Off (Note On vel 0)";
-                text << "Note Off (via Note On vélocité 0) - Ch " << result.channel;
+                result.messageType = "Note Off";
+                text << "Note Off - Ch " << result.channel;
             } else {
                 result.messageType = "Note On";
                 text << "Note On - Ch " << result.channel;
@@ -139,6 +139,7 @@ MidiMessage MidiDecoder::decode(const std::vector<std::uint8_t>& bytes,
             result.messageType = "Control Change";
             result.value = result.data2;
             const auto name = ccName(result.data1);
+            result.controllerName = name;
             text << "CC " << result.data1;
             if (!name.empty()) text << " - " << name;
             text << " - Ch " << result.channel << " - Value " << result.value;

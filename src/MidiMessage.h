@@ -19,6 +19,7 @@ struct MidiMessage {
     std::string noteName;
     int velocity = -1;
     int value = -1;
+    std::string controllerName;
     std::string description;
     std::string runningStatus = "not_observable";
     std::string source = "WinMM";
