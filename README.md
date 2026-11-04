@@ -117,8 +117,10 @@ L'historique conserve 100 000 messages. Une fois la limite atteinte, un avertiss
 affiché, les plus anciens messages sont remplacés et leur nombre reste visible. La file entre le
 callback et l'interface contient au maximum 65 536 événements ; une saturation est explicitement
 signalée avec le nombre de messages perdus. Les mises à jour sont traitées par lots sur le thread
-graphique, au maximum toutes les 20 ms. Lorsqu'une zone ancienne du journal est consultée, les
-nouvelles arrivées mettent à jour le nombre de lignes sans redessiner toute la liste.
+graphique, au maximum toutes les 20 ms. Le corps du tableau ne dessine que les lignes visibles :
+les messages hors écran restent dans l'historique sans devenir autant de contrôles Windows. Le
+défilement conserve ainsi un coût constant, y compris lorsque le journal contient plusieurs
+milliers de messages ou qu'un outil d'accessibilité Windows inspecte la fenêtre.
 
 Les erreurs d'ouverture WinMM, de buffer SysEx, de réception et d'écriture CSV sont présentées à
 l'utilisateur. Fermer l'application arrête et réinitialise l'entrée, libère les en-têtes SysEx,
@@ -147,7 +149,7 @@ réellement son entrée et sa sortie avec WinMM, envoie `90 3C 64` puis `80 3C 0
 réception dans cet ordre par le module de capture. Le test est marqué ignoré (et non échoué) si
 loopMIDI n'est pas disponible.
 
-`MainWindowStressTests` injecte 450 messages dans la file de l'interface, fait énumérer ses
+`MainWindowStressTests` injecte 10 000 messages dans la file de l'interface, fait énumérer ses
 contrôles par Windows UI Automation puis remonte dans le journal. Il protège ainsi contre les
 blocages de la liste lors du défilement, sans dépendre d'un port MIDI externe.
 

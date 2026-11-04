@@ -42,7 +42,10 @@ public:
     std::uint64_t takeDroppedCount();
     bool isOpen() const { return handle_ != nullptr; }
 #ifdef MIDI_MONITOR_TESTING
-    void enqueueForTesting(MidiInputPacket packet) { enqueue(std::move(packet)); }
+    void enqueueForTesting(MidiInputPacket packet, HWND notificationWindow) {
+        notificationWindow_ = notificationWindow;
+        enqueue(std::move(packet));
+    }
 #endif
 
     static constexpr UINT NotificationMessage = WM_APP + 42;

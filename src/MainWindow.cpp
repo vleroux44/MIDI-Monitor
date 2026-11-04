@@ -8,6 +8,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <sstream>
@@ -29,6 +30,8 @@ constexpr int TypeColumnWidth = 155;
 constexpr int ChannelColumnWidth = 55;
 constexpr int ValueColumnWidth = 85;
 constexpr int ColumnCount = 6;
+constexpr wchar_t MainWindowClass[] = L"OrganologicMidiMonitorWindow";
+constexpr wchar_t LogViewClass[] = L"OrganologicMidiLogView";
 
 std::wstring utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
@@ -80,18 +83,39 @@ bool MainWindow::create(int showCommand) {
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     if (!wc.hIconSm) wc.hIconSm = wc.hIcon;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"OrganologicMidiMonitorWindow";
+    wc.lpszClassName = MainWindowClass;
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+
+    WNDCLASSEXW logClass{sizeof(logClass)};
+    logClass.style = CS_HREDRAW | CS_VREDRAW;
+    logClass.lpfnWndProc = &MainWindow::logViewProc;
+    logClass.hInstance = instance_;
+    logClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    logClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    logClass.lpszClassName = LogViewClass;
+    if (!RegisterClassExW(&logClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
     RECT rect{0, 0, 940, 600};
     AdjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, FALSE, 0);
-    window_ = CreateWindowExW(0, wc.lpszClassName, L"MIDI Monitor", WS_OVERLAPPEDWINDOW,
+    window_ = CreateWindowExW(0, MainWindowClass, L"MIDI Monitor", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
         nullptr, nullptr, instance_, this);
     if (!window_) return false;
     ShowWindow(window_, showCommand);
     UpdateWindow(window_);
     return true;
+}
+
+LRESULT CALLBACK MainWindow::logViewProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = static_cast<MainWindow*>(create->lpCreateParams);
+        self->listView_ = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    return self ? self->handleLogViewMessage(message, wParam, lParam)
+                : DefWindowProcW(window, message, wParam, lParam);
 }
 
 LRESULT CALLBACK MainWindow::windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -136,14 +160,14 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_NOTIFY: {
         const auto* header = reinterpret_cast<NMHDR*>(lParam);
-        if (header->hwndFrom == listView_ && header->code == LVN_COLUMNCLICK) {
-            const auto* click = reinterpret_cast<NMLISTVIEW*>(lParam);
-            sortByColumn(click->iSubItem);
+        if (header->hwndFrom == header_ && header->code == HDN_ITEMCLICKW) {
+            const auto* click = reinterpret_cast<NMHEADERW*>(lParam);
+            sortByColumn(click->iItem);
             return 0;
         }
-        if (header->hwndFrom == listView_ && header->code == LVN_KEYDOWN) {
-            const auto* key = reinterpret_cast<NMLVKEYDOWN*>(lParam);
-            if ((key->wVKey == 'C') && (GetKeyState(VK_CONTROL) & 0x8000)) copySelectedRows();
+        if (header->hwndFrom == header_
+            && (header->code == HDN_ITEMCHANGEDW || header->code == HDN_ENDTRACKW)) {
+            InvalidateRect(listView_, nullptr, FALSE);
             return 0;
         }
         break;
@@ -194,6 +218,103 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(window_, message, wParam, lParam);
 }
 
+LRESULT MainWindow::handleLogViewMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_PAINT:
+        paintLogView();
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        updateLogScrollBar();
+        return 0;
+    case WM_VSCROLL: {
+        SCROLLINFO info{sizeof(info), SIF_ALL};
+        GetScrollInfo(listView_, SB_VERT, &info);
+        long long target = static_cast<long long>(topRow_);
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP: target -= 1; break;
+        case SB_LINEDOWN: target += 1; break;
+        case SB_PAGEUP: target -= logRowsPerPage(); break;
+        case SB_PAGEDOWN: target += logRowsPerPage(); break;
+        case SB_TOP: target = 0; break;
+        case SB_BOTTOM: target = static_cast<long long>(visibleRows_.size()); break;
+        case SB_THUMBPOSITION:
+        case SB_THUMBTRACK: target = info.nTrackPos; break;
+        default: return 0;
+        }
+        setTopRow(static_cast<std::size_t>(std::max(0LL, target)));
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        wheelDeltaRemainder_ += GET_WHEEL_DELTA_WPARAM(wParam);
+        const int notches = wheelDeltaRemainder_ / WHEEL_DELTA;
+        wheelDeltaRemainder_ %= WHEEL_DELTA;
+        const long long target = static_cast<long long>(topRow_) - notches * 3LL;
+        setTopRow(static_cast<std::size_t>(std::max(0LL, target)));
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        SetFocus(listView_);
+        const int y = static_cast<short>(HIWORD(lParam));
+        const int rowHeight = std::max(1, scale(21, dpi_));
+        const std::size_t row = topRow_ + static_cast<std::size_t>(std::max(0, y) / rowHeight);
+        if (row < visibleRows_.size()) {
+            selectViewRow(row, (wParam & MK_CONTROL) != 0, (wParam & MK_SHIFT) != 0);
+        } else if ((wParam & MK_CONTROL) == 0) {
+            selectedViewRows_.clear();
+            selectionAnchor_ = selectionCaret_ = static_cast<std::size_t>(-1);
+            InvalidateRect(listView_, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN: {
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (ctrl && wParam == 'C') {
+            copySelectedRows();
+            return 0;
+        }
+        if (ctrl && wParam == 'A') {
+            selectedViewRows_.clear();
+            for (std::size_t row = 0; row < visibleRows_.size(); ++row)
+                selectedViewRows_.insert(row);
+            if (!visibleRows_.empty()) {
+                selectionAnchor_ = 0;
+                selectionCaret_ = visibleRows_.size() - 1;
+            }
+            InvalidateRect(listView_, nullptr, FALSE);
+            return 0;
+        }
+        if (visibleRows_.empty()) return 0;
+        const std::size_t last = visibleRows_.size() - 1;
+        const std::size_t current = selectionCaret_ <= last ? selectionCaret_
+                                                            : std::min(topRow_, last);
+        std::size_t target = current;
+        switch (wParam) {
+        case VK_UP: if (target > 0) --target; break;
+        case VK_DOWN: if (target < last) ++target; break;
+        case VK_PRIOR: target = target > static_cast<std::size_t>(logRowsPerPage())
+                                      ? target - static_cast<std::size_t>(logRowsPerPage()) : 0; break;
+        case VK_NEXT: target = std::min(last, target + static_cast<std::size_t>(logRowsPerPage())); break;
+        case VK_HOME: target = 0; break;
+        case VK_END: target = last; break;
+        default: return DefWindowProcW(listView_, message, wParam, lParam);
+        }
+        selectViewRow(target, false, shift);
+        ensureRowVisible(target);
+        return 0;
+    }
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(listView_, nullptr, FALSE);
+        return 0;
+    }
+    return DefWindowProcW(listView_, message, wParam, lParam);
+}
+
 void MainWindow::createControls() {
     uiFont_ = CreateFontW(-MulDiv(9, dpi_, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -242,31 +363,35 @@ void MainWindow::createControls() {
     runningStatusLabel_ = CreateWindowExW(0, L"STATIC",
         L"Running status : non observable via WinMM (messages normalisés par Windows).",
         WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window_, nullptr, instance_, nullptr);
-    listView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+    // A native ListView creates one accessibility element per MIDI message. Its UI Automation
+    // bridge can monopolize the UI thread during bursts and scrolling, so only the six-column
+    // header stays native; the body below paints the visible rows directly.
+    header_ = CreateWindowExW(0, WC_HEADERW, nullptr,
+        WS_CHILD | WS_VISIBLE | HDS_HORZ | HDS_BUTTONS | HDS_FULLDRAG,
         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
-    SetWindowTextW(listView_, L"Journal MIDI");
-    ListView_SetExtendedListViewStyle(listView_,
-        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
-    LVCOLUMNW column{LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM};
+    listView_ = CreateWindowExW(WS_EX_CLIENTEDGE, LogViewClass, L"Journal MIDI",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL,
+        0, 0, 0, 0, window_, nullptr, instance_, this);
+    HDITEMW column{HDI_TEXT | HDI_WIDTH | HDI_FORMAT};
+    column.fmt = HDF_LEFT | HDF_STRING;
     wchar_t timestamp[] = L"Horodatage";
-    column.pszText = timestamp; column.cx = scale(TimestampColumnWidth, dpi_); column.iSubItem = 0;
-    ListView_InsertColumn(listView_, 0, &column);
+    column.pszText = timestamp; column.cxy = scale(TimestampColumnWidth, dpi_);
+    Header_InsertItem(header_, 0, &column);
     wchar_t hex[] = L"Données HEX";
-    column.pszText = hex; column.cx = scale(HexColumnWidth, dpi_); column.iSubItem = 1;
-    ListView_InsertColumn(listView_, 1, &column);
+    column.pszText = hex; column.cxy = scale(HexColumnWidth, dpi_);
+    Header_InsertItem(header_, 1, &column);
     wchar_t type[] = L"Type";
-    column.pszText = type; column.cx = scale(TypeColumnWidth, dpi_); column.iSubItem = 2;
-    ListView_InsertColumn(listView_, 2, &column);
+    column.pszText = type; column.cxy = scale(TypeColumnWidth, dpi_);
+    Header_InsertItem(header_, 2, &column);
     wchar_t channel[] = L"Canal";
-    column.pszText = channel; column.cx = scale(ChannelColumnWidth, dpi_); column.iSubItem = 3;
-    ListView_InsertColumn(listView_, 3, &column);
+    column.pszText = channel; column.cxy = scale(ChannelColumnWidth, dpi_);
+    Header_InsertItem(header_, 3, &column);
     wchar_t parameter[] = L"Paramètre";
-    column.pszText = parameter; column.cx = scale(240, dpi_); column.iSubItem = 4;
-    ListView_InsertColumn(listView_, 4, &column);
+    column.pszText = parameter; column.cxy = scale(240, dpi_);
+    Header_InsertItem(header_, 4, &column);
     wchar_t value[] = L"Valeur";
-    column.pszText = value; column.cx = scale(ValueColumnWidth, dpi_); column.iSubItem = 5;
-    ListView_InsertColumn(listView_, 5, &column);
+    column.pszText = value; column.cxy = scale(ValueColumnWidth, dpi_);
+    Header_InsertItem(header_, 5, &column);
 
     counterLabel_ = CreateWindowExW(0, L"STATIC", L"Messages reçus : 0", WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
@@ -286,6 +411,7 @@ void MainWindow::createControls() {
                          filterCombo_, runningStatusLabel_,
                          counterLabel_, resetButton_, saveButton_, footerLabel_, footerLink_})
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
+    SendMessageW(header_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     SendMessageW(listView_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
 
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
@@ -337,16 +463,26 @@ void MainWindow::layout() {
 
     const int bottomControlsY = height - margin - scale(52, dpi_);
     const int listHeight = std::max(scale(100, dpi_), bottomControlsY - y - gap);
-    MoveWindow(listView_, margin, y, width - 2 * margin, listHeight, TRUE);
-    ListView_SetColumnWidth(listView_, 0, scale(TimestampColumnWidth, dpi_));
-    ListView_SetColumnWidth(listView_, 1, scale(HexColumnWidth, dpi_));
-    ListView_SetColumnWidth(listView_, 2, scale(TypeColumnWidth, dpi_));
-    ListView_SetColumnWidth(listView_, 3, scale(ChannelColumnWidth, dpi_));
+    const int headerHeight = scale(24, dpi_);
+    MoveWindow(header_, margin, y, width - 2 * margin, headerHeight, TRUE);
+    MoveWindow(listView_, margin, y + headerHeight, width - 2 * margin,
+               std::max(1, listHeight - headerHeight), TRUE);
+    auto setColumnWidth = [this](int column, int columnWidth) {
+        HDITEMW item{};
+        item.mask = HDI_WIDTH;
+        item.cxy = columnWidth;
+        Header_SetItem(header_, column, &item);
+    };
+    setColumnWidth(0, scale(TimestampColumnWidth, dpi_));
+    setColumnWidth(1, scale(HexColumnWidth, dpi_));
+    setColumnWidth(2, scale(TypeColumnWidth, dpi_));
+    setColumnWidth(3, scale(ChannelColumnWidth, dpi_));
     const int fixedColumns = TimestampColumnWidth + HexColumnWidth + TypeColumnWidth
         + ChannelColumnWidth + ValueColumnWidth;
-    ListView_SetColumnWidth(listView_, 4, std::max(scale(170, dpi_),
+    setColumnWidth(4, std::max(scale(170, dpi_),
         width - 2 * margin - scale(fixedColumns, dpi_) - 4));
-    ListView_SetColumnWidth(listView_, 5, scale(ValueColumnWidth, dpi_));
+    setColumnWidth(5, scale(ValueColumnWidth, dpi_));
+    InvalidateRect(listView_, nullptr, FALSE);
 
     y = bottomControlsY;
     MoveWindow(counterLabel_, margin, y + scale(6, dpi_), scale(260, dpi_), controlHeight, TRUE);
@@ -409,9 +545,7 @@ void MainWindow::connectSelectedPort() {
 
 bool MainWindow::isListAtBottom() const {
     if (visibleRows_.empty()) return true;
-    const int top = ListView_GetTopIndex(listView_);
-    const int perPage = ListView_GetCountPerPage(listView_);
-    return top + perPage >= static_cast<int>(visibleRows_.size()) - 1;
+    return topRow_ + static_cast<std::size_t>(logRowsPerPage()) >= visibleRows_.size();
 }
 
 void MainWindow::scheduleMidiDrain() {
@@ -446,37 +580,148 @@ void MainWindow::rebuildVisibleRows() {
 }
 
 void MainWindow::updateListItemCount(bool redrawAll) {
-    int firstRow = ListView_GetItemCount(listView_);
-    if (!redrawAll && firstRow >= static_cast<int>(visibleRows_.size())) return;
-
-    SendMessageW(listView_, WM_SETREDRAW, FALSE, 0);
     if (redrawAll) {
-        ListView_DeleteAllItems(listView_);
-        firstRow = 0;
+        selectedViewRows_.clear();
+        selectionAnchor_ = selectionCaret_ = static_cast<std::size_t>(-1);
     }
-    for (std::size_t row = static_cast<std::size_t>(firstRow);
-         row < visibleRows_.size(); ++row) {
-        insertListRow(row);
-    }
-    SendMessageW(listView_, WM_SETREDRAW, TRUE, 0);
-    if (redrawAll) {
-        RedrawWindow(listView_, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
-    }
+    updateLogScrollBar();
+    InvalidateRect(listView_, nullptr, FALSE);
 }
 
-void MainWindow::insertListRow(std::size_t row) {
-    std::wstring timestamp = listText(row, 0);
-    LVITEMW item{};
-    item.mask = LVIF_TEXT;
-    item.iItem = static_cast<int>(row);
-    item.pszText = timestamp.data();
-    const int inserted = ListView_InsertItem(listView_, &item);
-    if (inserted < 0) return;
-    for (int column = 1; column < ColumnCount; ++column) {
-        std::wstring text = listText(row, column);
-        ListView_SetItemText(listView_, inserted, column, text.data());
+int MainWindow::logRowsPerPage() const {
+    if (!listView_) return 1;
+    RECT client{};
+    GetClientRect(listView_, &client);
+    const int height = static_cast<int>(client.bottom - client.top);
+    return std::max(1, height / std::max(1, scale(21, dpi_)));
+}
+
+void MainWindow::updateLogScrollBar() {
+    if (!listView_) return;
+    const std::size_t page = static_cast<std::size_t>(logRowsPerPage());
+    const std::size_t maxTop = visibleRows_.size() > page ? visibleRows_.size() - page : 0;
+    topRow_ = std::min(topRow_, maxTop);
+    SCROLLINFO info{sizeof(info)};
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL;
+    info.nMin = 0;
+    info.nMax = visibleRows_.empty() ? 0 : static_cast<int>(visibleRows_.size() - 1);
+    info.nPage = static_cast<UINT>(page);
+    info.nPos = static_cast<int>(topRow_);
+    SetScrollInfo(listView_, SB_VERT, &info, TRUE);
+}
+
+void MainWindow::setTopRow(std::size_t row) {
+    const std::size_t page = static_cast<std::size_t>(logRowsPerPage());
+    const std::size_t maxTop = visibleRows_.size() > page ? visibleRows_.size() - page : 0;
+    const std::size_t clamped = std::min(row, maxTop);
+    if (clamped == topRow_) return;
+    topRow_ = clamped;
+    SCROLLINFO info{sizeof(info), SIF_POS};
+    info.nPos = static_cast<int>(topRow_);
+    SetScrollInfo(listView_, SB_VERT, &info, TRUE);
+    InvalidateRect(listView_, nullptr, FALSE);
+}
+
+void MainWindow::ensureRowVisible(std::size_t row) {
+    if (row >= visibleRows_.size()) return;
+    const std::size_t page = static_cast<std::size_t>(logRowsPerPage());
+    if (row < topRow_) setTopRow(row);
+    else if (row >= topRow_ + page) setTopRow(row - page + 1);
+}
+
+void MainWindow::selectViewRow(std::size_t row, bool ctrl, bool shift) {
+    if (row >= visibleRows_.size()) return;
+    if (shift && selectionAnchor_ < visibleRows_.size()) {
+        if (!ctrl) selectedViewRows_.clear();
+        const auto first = std::min(selectionAnchor_, row);
+        const auto last = std::max(selectionAnchor_, row);
+        for (std::size_t current = first; current <= last; ++current)
+            selectedViewRows_.insert(current);
+    } else if (ctrl) {
+        if (!selectedViewRows_.erase(row)) selectedViewRows_.insert(row);
+        selectionAnchor_ = row;
+    } else {
+        selectedViewRows_.clear();
+        selectedViewRows_.insert(row);
+        selectionAnchor_ = row;
     }
+    selectionCaret_ = row;
+    InvalidateRect(listView_, nullptr, FALSE);
+}
+
+void MainWindow::paintLogView() {
+    PAINTSTRUCT paint{};
+    HDC target = BeginPaint(listView_, &paint);
+    RECT client{};
+    GetClientRect(listView_, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
+        EndPaint(listView_, &paint);
+        return;
+    }
+
+    HDC buffer = CreateCompatibleDC(target);
+    HBITMAP bitmap = CreateCompatibleBitmap(target, width, height);
+    HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
+    HGDIOBJ oldFont = SelectObject(buffer, monoFont_);
+    FillRect(buffer, &client, GetSysColorBrush(COLOR_WINDOW));
+    SetBkMode(buffer, TRANSPARENT);
+
+    std::array<int, ColumnCount> widths{};
+    for (int column = 0; column < ColumnCount; ++column) {
+        HDITEMW item{};
+        item.mask = HDI_WIDTH;
+        if (Header_GetItem(header_, column, &item)) widths[static_cast<std::size_t>(column)] = item.cxy;
+    }
+
+    HPEN gridPen = CreatePen(PS_SOLID, 1, RGB(225, 225, 225));
+    HGDIOBJ oldPen = SelectObject(buffer, gridPen);
+    const int rowHeight = std::max(1, scale(21, dpi_));
+    const std::size_t endRow = std::min(visibleRows_.size(),
+        topRow_ + static_cast<std::size_t>((height + rowHeight - 1) / rowHeight));
+    int y = 0;
+    for (std::size_t row = topRow_; row < endRow; ++row, y += rowHeight) {
+        RECT rowRect{0, y, width, std::min(height, y + rowHeight)};
+        const bool selected = selectedViewRows_.find(row) != selectedViewRows_.end();
+        if (selected) {
+            const int color = GetFocus() == listView_ ? COLOR_HIGHLIGHT : COLOR_BTNFACE;
+            FillRect(buffer, &rowRect, GetSysColorBrush(color));
+            SetTextColor(buffer, GetFocus() == listView_ ? GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                                        : GetSysColor(COLOR_WINDOWTEXT));
+        } else {
+            SetTextColor(buffer, GetSysColor(COLOR_WINDOWTEXT));
+        }
+
+        int x = 0;
+        for (int column = 0; column < ColumnCount; ++column) {
+            const int cellWidth = widths[static_cast<std::size_t>(column)];
+            RECT textRect{x + scale(4, dpi_), y,
+                          std::min(width, x + cellWidth - scale(4, dpi_)),
+                          std::min(height, y + rowHeight)};
+            if (textRect.right > textRect.left && x < width) {
+                std::wstring text = listText(row, column);
+                DrawTextW(buffer, text.c_str(), static_cast<int>(text.size()), &textRect,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+            x += cellWidth;
+            MoveToEx(buffer, x - 1, y, nullptr);
+            LineTo(buffer, x - 1, std::min(height, y + rowHeight));
+        }
+        MoveToEx(buffer, 0, std::min(height - 1, y + rowHeight - 1), nullptr);
+        LineTo(buffer, width, std::min(height - 1, y + rowHeight - 1));
+        if (selected && row == selectionCaret_ && GetFocus() == listView_)
+            DrawFocusRect(buffer, &rowRect);
+    }
+
+    BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+    SelectObject(buffer, oldPen);
+    DeleteObject(gridPen);
+    SelectObject(buffer, oldFont);
+    SelectObject(buffer, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(buffer);
+    EndPaint(listView_, &paint);
 }
 
 void MainWindow::applyFilter() {
@@ -487,7 +732,7 @@ void MainWindow::applyFilter() {
     filter_ = static_cast<MidiFilter>(data);
     rebuildVisibleRows();
     updateListItemCount(true);
-    if (!visibleRows_.empty()) ListView_EnsureVisible(listView_, 0, FALSE);
+    setTopRow(0);
     updateCounter();
 }
 
@@ -501,22 +746,22 @@ void MainWindow::sortByColumn(int column) {
     }
     rebuildVisibleRows();
     updateListItemCount(true);
+    setTopRow(0);
     updateSortIndicator();
     updateCounter();
 }
 
 void MainWindow::updateSortIndicator() {
-    HWND header = ListView_GetHeader(listView_);
-    if (!header) return;
+    if (!header_) return;
     for (int column = 0; column < ColumnCount; ++column) {
         HDITEMW item{};
         item.mask = HDI_FORMAT;
-        if (!Header_GetItem(header, column, &item)) continue;
+        if (!Header_GetItem(header_, column, &item)) continue;
         item.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
         if (sortColumn_ == static_cast<MidiSortColumn>(column)) {
             item.fmt |= sortAscending_ ? HDF_SORTUP : HDF_SORTDOWN;
         }
-        Header_SetItem(header, column, &item);
+        Header_SetItem(header_, column, &item);
     }
 }
 
@@ -572,8 +817,7 @@ void MainWindow::drainMidi() {
         }
         updateListItemCount(viewReordered);
         if (follow && !visibleRows_.empty()) {
-            const int last = static_cast<int>(visibleRows_.size() - 1);
-            ListView_EnsureVisible(listView_, last, FALSE);
+            ensureRowVisible(visibleRows_.size() - 1);
         }
         updateCounter();
     }
@@ -584,8 +828,12 @@ void MainWindow::resetLog() {
     midiInput_.clearQueue();
     log_.clear();
     visibleRows_.clear();
+    selectedViewRows_.clear();
+    selectionAnchor_ = selectionCaret_ = static_cast<std::size_t>(-1);
+    topRow_ = 0;
     capacityWarningShown_ = false;
-    ListView_DeleteAllItems(listView_);
+    updateLogScrollBar();
+    InvalidateRect(listView_, nullptr, FALSE);
     updateCounter();
 }
 
@@ -617,11 +865,11 @@ std::wstring MainWindow::listText(std::size_t row, int column) const {
 
 void MainWindow::copySelectedRows() {
     std::wstring text;
-    int item = -1;
-    while ((item = ListView_GetNextItem(listView_, item, LVNI_SELECTED)) != -1) {
+    for (const std::size_t item : selectedViewRows_) {
+        if (item >= visibleRows_.size()) continue;
         for (int column = 0; column < ColumnCount; ++column) {
             if (column) text += L'\t';
-            text += listText(static_cast<std::size_t>(item), column);
+            text += listText(item, column);
         }
         text += L"\r\n";
     }
