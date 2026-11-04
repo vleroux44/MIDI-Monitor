@@ -11,6 +11,8 @@ statique.
 
 Le projet est distribué sous [licence MIT](LICENSE).
 
+**[Télécharger directement l'exécutable Windows « MIDI Monitor.exe »](https://github.com/vleroux44/MIDI-Monitor/raw/refs/heads/main/dist/windows/MIDI%20Monitor.exe)**
+
 ## Prérequis et compilation
 
 - Windows 10 ou Windows 11 x64 ;
@@ -18,23 +20,21 @@ Le projet est distribué sous [licence MIT](LICENSE).
 - Visual Studio Build Tools avec le composant **Développement Desktop en C++** et un SDK
   Windows récent.
 
-Dans un terminal « Developer PowerShell for VS » à la racine du projet :
+Dans un terminal « x64 Native Tools Command Prompt for VS » ou un
+« Developer PowerShell for VS » configuré pour x64, à la racine du projet :
 
 ```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+cmake -S . -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 La compilation copie automatiquement le programme dans
-`dist/windows/MIDI Monitor.exe`. L'application est de sous-système Windows : aucune console
+[MIDI Monitor.exe](dist/windows/MIDI%20Monitor.exe). L'application est de sous-système Windows : aucune console
 n'est ouverte et aucun privilège administrateur n'est normalement nécessaire.
 
-L'icône Windows multi-résolution est générée depuis `assets/MIDIMonitor.png` avec :
-
-```powershell
-.\tools\GenerateIcon.ps1
-```
+L'icône Windows multi-résolution nécessaire à la compilation est incluse dans
+`assets/MIDIMonitor.ico`.
 
 ## Utilisation
 
